@@ -12,8 +12,10 @@ import akka.kafka.internal.{CommittableConsumerStage, PlainConsumerStage}
 import akka.stream.ActorAttributes
 import akka.stream.scaladsl.Source
 import org.apache.kafka.clients.consumer.ConsumerRecord
+import akka.stream.ActorAttributes
 
 import scala.concurrent.Future
+import org.apache.kafka.common.TopicPartition
 
 /**
  * Akka Stream connector for subscribing to Kafka topics.
@@ -180,5 +182,9 @@ object Consumer {
     }
   }
 
+  def committablePartitionedSource[K, V](settings: ConsumerSettings[K, V]):
+    Source[(TopicPartition, Source[CommittableMessage[K, V], Control]), Control] = {
+    ???
+  }
 }
 
