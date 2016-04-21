@@ -182,8 +182,7 @@ object Consumer {
     }
   }
 
-  def committablePartitionedSource[K, V](settings: ConsumerSettings[K, V]):
-    Source[(TopicPartition, Source[CommittableMessage[K, V], Control]), Control] = {
+  def committablePartitionedSource[K, V](settings: ConsumerSettings[K, V]): Source[(TopicPartition, Source[CommittableMessage[K, V], Control]), Control] = {
     ???
   }
 }

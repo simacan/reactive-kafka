@@ -140,7 +140,6 @@ object ConsumerToProducerWithBatchCommits2Example extends ConsumerExample {
     .mapAsync(producerSettings.parallelism)(_.commit())
 }
 
-
 // Backpressure per partition with batch commit
 object ConsumerWithPerPartitionBackpressure extends ConsumerExample {
   val control = Consumer.committablePartitionedSource(consumerSettings.withClientId("client1"))
@@ -155,11 +154,12 @@ object ConsumerWithPerPartitionBackpressure extends ConsumerExample {
 // Flow per partition
 object ConsumerWithIndependentFlowsPerPartition extends ConsumerExample {
   val control = Consumer.committablePartitionedSource(consumerSettings.withClientId("client1"))
-    .map { case (topicPartition, source) =>
-      source
-        .via(business)
-        .toMat(Sink.ignore)(Keep.both)
-        .run()
+    .map {
+      case (topicPartition, source) =>
+        source
+          .via(business)
+          .toMat(Sink.ignore)(Keep.both)
+          .run()
     }
     .mapAsyncUnordered(maxPartitions)(_._2)
 }
@@ -170,24 +170,28 @@ object ConsumerWithOtherSource extends ConsumerExample {
   def zipper(left: Source[Msg, _], right: Source[Msg, _]): Source[(Msg, Msg), NotUsed] = ???
 
   val control = Consumer.committablePartitionedSource(consumerSettings.withClientId("client1"))
-    .map { case (topicPartition, source) =>
-      // get corresponding partition from other topic
-      val otherSource = {
-        val otherTopicPartition = new TopicPartition("otherTopic", topicPartition.partition())
-        Consumer.committableSource(consumerSettings.withAssignment(otherTopicPartition))
-      }
-      zipper(source, otherSource)
+    .map {
+      case (topicPartition, source) =>
+        // get corresponding partition from other topic
+        val otherSource = {
+          val otherTopicPartition = new TopicPartition("otherTopic", topicPartition.partition())
+          Consumer.committableSource(consumerSettings.withAssignment(otherTopicPartition))
+        }
+        zipper(source, otherSource)
     }
     .flatMapMerge(maxPartitions, identity)
     .via(business)
     //build commit offsets
-    .batch(max = 100, { case (l, r) => (
-      CommittableOffsetBatch.empty.updated(l.committableOffset),
-      CommittableOffsetBatch.empty.updated(r.committableOffset)
-    )}) { case ((batchL, batchR), (l, r)) =>
-      batchL.updated(l.committableOffset)
-      batchR.updated(r.committableOffset)
-      (batchL, batchR)
+    .batch(max = 100, {
+      case (l, r) => (
+        CommittableOffsetBatch.empty.updated(l.committableOffset),
+        CommittableOffsetBatch.empty.updated(r.committableOffset)
+      )
+    }) {
+      case ((batchL, batchR), (l, r)) =>
+        batchL.updated(l.committableOffset)
+        batchR.updated(r.committableOffset)
+        (batchL, batchR)
     }
     .mapAsync(1) { case (l, r) => l.commit().map(_ => r) }
     .mapAsync(1)(_.commit())
