@@ -12,10 +12,9 @@ import akka.kafka.internal.{CommittableConsumerStage, PlainConsumerStage}
 import akka.stream.ActorAttributes
 import akka.stream.scaladsl.Source
 import org.apache.kafka.clients.consumer.ConsumerRecord
-import akka.stream.ActorAttributes
+import org.apache.kafka.common.TopicPartition
 
 import scala.concurrent.Future
-import org.apache.kafka.common.TopicPartition
 
 /**
  * Akka Stream connector for subscribing to Kafka topics.
