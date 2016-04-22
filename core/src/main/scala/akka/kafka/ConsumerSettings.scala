@@ -195,12 +195,14 @@ final class ConsumerSettings[K, V](
     }
     val consumer = new KafkaConsumer[K, V](javaProps, keyDeserializer, valueDeserializer)
     val assignments2 = assignments union fromOffsets.keySet
-    //    if (topics.nonEmpty && assignments2.nonEmpty)
-    //      throw new IllegalArgumentException("Either topics or assignments must be defined, both of them were defined: $settings")
-    //    else if (assignments2.nonEmpty)
-    //      consumer.assign(assignments2.toList.asJava)
-    //    else
-    //      throw new IllegalArgumentException("Either topics or assignments must be defined, none of them were defined: $settings")
+    if (topics.nonEmpty && assignments2.nonEmpty)
+      throw new IllegalArgumentException("Either topics or assignments must be defined, both of them were defined: $settings")
+    else if (assignments2.nonEmpty)
+      consumer.assign(assignments2.toList.asJava)
+    else if (topics.nonEmpty)
+      consumer.subscribe(topics.toList.asJava)
+    else
+      throw new IllegalArgumentException("Either topics or assignments must be defined, none of them were defined: $settings")
 
     if (fromOffsets.nonEmpty) {
       fromOffsets.foreach {
