@@ -7,7 +7,8 @@ package akka.kafka.internal
 import java.util
 
 import akka.Done
-import akka.actor.{Actor, ActorRef, Props, Terminated}
+import akka.actor.Actor.Receive
+import akka.actor.{Actor, ActorRef, ActorSystem, Props, Terminated}
 import akka.event.LoggingReceive
 import akka.kafka.ConsumerSettings
 import akka.kafka.internal.ByPartitionActor.RegisterSubSource
@@ -20,7 +21,7 @@ import org.apache.kafka.common.TopicPartition
 
 import scala.annotation.tailrec
 import scala.collection.immutable
-import scala.concurrent.Future
+import scala.concurrent.{Future, Promise}
 
 object SubSourceActor {
   case object Complete
@@ -60,8 +61,37 @@ class SubSourceActor[K, V](mainSource: ActorRef, tp: TopicPartition, kafkaPump: 
 
 object ByPartitionActor {
   case class RegisterSubSource(tp: TopicPartition)
+  private case object Stop
+  private case object Stopped
+
+  def apply[K, V](settings: ConsumerSettings[K, V])(implicit as: ActorSystem): Source[(TopicPartition, Source[ConsumerRecord[K, V], Control]), Control] = {
+    Source.actorPublisher[(TopicPartition, Source[ConsumerRecord[K, V], Control])](Props(new ByPartitionActor(settings)))
+      .mapMaterializedValue { ref =>
+        val _shutdown = Promise[Done]
+        val _stop = Promise[Done]
+
+        val proxyActor = as.actorOf(Props(new Actor {
+          override def receive: Receive = {
+            case Terminated(`ref`) => _shutdown.trySuccess(Done)
+            case Stopped => _stop.trySuccess(Done)
+          }
+        }))
+        new Control {
+          override def shutdown(): Future[Done] = {
+            as.stop(ref)
+            _shutdown.future
+          }
+          override def stop(): Future[Done] = {
+            ref.tell(Stop, proxyActor)
+            _stop.future
+          }
+          override def isShutdown: Future[Done] = _shutdown.future
+        }
+      }
+  }
 }
 class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPublisher[(TopicPartition, Source[ConsumerRecord[K, V], Control])] {
+  import ByPartitionActor._
   var kafkaPump: ActorRef = _
 
   override def preStart(): Unit = {
@@ -126,9 +156,8 @@ class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPubl
         case None =>
       }
     case Request(_) => pump()
-    case Cancel => {
-      context.stop(self)
-    }
+    case Cancel => context.stop(self)
+    case Stop => onComplete()
   }
 }
 

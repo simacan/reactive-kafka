@@ -29,8 +29,7 @@ object ByPartitionExample extends App {
     .withClientId(System.currentTimeMillis().toString)
     .withGroupId("test1")
 
-  val x = Source
-    .actorPublisher[(TopicPartition, Source[ConsumerRecord[Array[Byte], String], Control])](Props(new ByPartitionActor(settings)))
+  val (control, f) = ByPartitionActor(settings)
     .map {
       case (tp, s) =>
         println(s"Starting - $tp")
@@ -44,7 +43,11 @@ object ByPartitionExample extends App {
           .run()
     }
     .map { case (tp, f) => f.onComplete(result => println(s"$tp finished with $result")); tp }
-    .to(Sink.ignore)
+    .toMat(Sink.ignore)(Keep.both)
     .run()
+
+  f.onComplete(x => println(x))
+  Thread.sleep(10000)
+  control.shutdown()
 
 }
