@@ -60,33 +60,10 @@ class SubSourceActor[K, V](mainSource: ActorRef, tp: TopicPartition, kafkaPump: 
 
 object ByPartitionActor {
   case class RegisterSubSource(tp: TopicPartition)
-  private case object Stop
-  private case object Stopped
 
   def apply[K, V](settings: ConsumerSettings[K, V])(implicit as: ActorSystem): Source[(TopicPartition, Source[ConsumerRecord[K, V], Control]), Control] = {
     Source.actorPublisher[(TopicPartition, Source[ConsumerRecord[K, V], Control])](Props(new ByPartitionActor(settings)))
-      .mapMaterializedValue { ref =>
-        val _shutdown = Promise[Done]
-        val _stop = Promise[Done]
-
-        val proxyActor = as.actorOf(Props(new Actor {
-          override def receive: Receive = {
-            case Terminated(`ref`) => _shutdown.trySuccess(Done)
-            case Stopped => _stop.trySuccess(Done)
-          }
-        }))
-        new Control {
-          override def shutdown(): Future[Done] = {
-            as.stop(ref)
-            _shutdown.future
-          }
-          override def stop(): Future[Done] = {
-            ref.tell(Stop, proxyActor)
-            _stop.future
-          }
-          override def isShutdown: Future[Done] = _shutdown.future
-        }
-      }
+      .mapMaterializedValue(ActorControl(_))
   }
 }
 class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPublisher[(TopicPartition, Source[ConsumerRecord[K, V], Control])] {
@@ -109,11 +86,7 @@ class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPubl
 
   def createSource(tp: TopicPartition): Source[ConsumerRecord[K, V], Control] = {
     Source.actorPublisher(Props(new SubSourceActor(self, tp, kafkaPump)))
-      .mapMaterializedValue(ref => new Control {
-        override def stop(): Future[Done] = ???
-        override def shutdown(): Future[Done] = ???
-        override def isShutdown: Future[Done] = ???
-      })
+      .mapMaterializedValue(ActorControl(_)(context.system))
   }
 
   @tailrec
@@ -156,7 +129,9 @@ class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPubl
       }
     case Request(_) => pump()
     case Cancel => context.stop(self)
-    case Stop => onComplete()
+    case ActorControl.Stop =>
+      sender ! ActorControl.Stopped
+      onComplete()
   }
 }
 
@@ -239,4 +214,32 @@ class KafkaPump[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor 
     import context.dispatcher
     context.system.scheduler.scheduleOnce(pollDelay(), self, Poll)
   }
+}
+
+object ActorControl {
+  case object Stop
+  case object Stopped
+}
+case class ActorControl(ref: ActorRef)(implicit as: ActorSystem) extends Control {
+  import ActorControl._
+  val _shutdown = Promise[Done]
+  val _stop = Promise[Done]
+
+  val proxyActor = as.actorOf(Props(new Actor {
+    override def receive: Receive = {
+      case Terminated(`ref`) => _shutdown.trySuccess(Done)
+      case Stopped => _stop.trySuccess(Done)
+    }
+  }))
+  override def shutdown(): Future[Done] = {
+    as.stop(ref)
+    _shutdown.future
+  }
+
+  override def stop(): Future[Done] = {
+    ref.tell(Stop, proxyActor)
+    _stop.future
+  }
+
+  override def isShutdown: Future[Done] = _shutdown.future
 }
