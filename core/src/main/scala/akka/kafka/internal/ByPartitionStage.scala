@@ -19,7 +19,7 @@ import org.apache.kafka.clients.consumer.{ConsumerRebalanceListener, ConsumerRec
 import org.apache.kafka.common.TopicPartition
 
 import scala.annotation.tailrec
-import scala.collection.{immutable, _}
+import scala.collection.immutable
 import scala.concurrent.Future
 
 object SubSourceActor {
@@ -70,6 +70,12 @@ class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPubl
     kafkaPump ! KafkaPump.Subscribe(settings.topics.toList)
   }
 
+  override def postStop(): Unit = {
+    children.values.foreach(context.stop)
+    context.stop(kafkaPump)
+    super.postStop()
+  }
+
   override def receive: Receive = normal
 
   def createSource(tp: TopicPartition): Source[ConsumerRecord[K, V], Control] = {
@@ -93,6 +99,7 @@ class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPubl
 
   var buffer: immutable.Queue[TopicPartition] = immutable.Queue.empty
   var children: Map[TopicPartition, ActorRef] = immutable.Map.empty
+
   def normal: Receive = LoggingReceive {
     case RegisterSubSource(tp) =>
       context.watch(sender)
@@ -102,19 +109,26 @@ class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPubl
       pump()
     case KafkaPump.Revoked(tps) =>
       tps.foreach { tp =>
-        println(s"Processing $tp. ${children.get(tp)}. $children")
         children.get(tp) match {
           case Some(ref) =>
-            println(s"Stop")
+            context.unwatch(ref)
             context.stop(ref)
           case None =>
-            println(s"Filtering")
             buffer = buffer.filter(x => tps.contains(x))
         }
       }
-    case Terminated(ref) => buffer = buffer.filter(_ != ref)
+    case Terminated(ref) =>
+      children.find(_._2 == ref) match {
+        case Some((tp, _)) =>
+          children -= tp
+          buffer :+= tp
+          pump()
+        case None =>
+      }
     case Request(_) => pump()
-    case Cancel => context.stop(self)
+    case Cancel => {
+      context.stop(self)
+    }
   }
 }
 
