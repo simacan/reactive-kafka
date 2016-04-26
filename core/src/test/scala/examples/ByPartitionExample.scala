@@ -6,14 +6,11 @@ package examples
  */
 import java.math.BigInteger
 
-import akka.actor.{ActorSystem, Props}
+import akka.actor.ActorSystem
 import akka.kafka.ConsumerSettings
 import akka.kafka.internal.ByPartitionActor
-import akka.kafka.scaladsl.Consumer.Control
-import akka.stream.scaladsl.{Keep, Sink, Source}
+import akka.stream.scaladsl.{Keep, Sink}
 import akka.stream.{ActorMaterializer, ActorMaterializerSettings}
-import org.apache.kafka.clients.consumer.ConsumerRecord
-import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, StringDeserializer}
 
 object ByPartitionExample extends App {

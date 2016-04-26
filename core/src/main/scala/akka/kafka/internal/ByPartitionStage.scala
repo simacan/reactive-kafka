@@ -7,7 +7,6 @@ package akka.kafka.internal
 import java.util
 
 import akka.Done
-import akka.actor.Actor.Receive
 import akka.actor.{Actor, ActorRef, ActorSystem, Props, Terminated}
 import akka.event.LoggingReceive
 import akka.kafka.ConsumerSettings
@@ -216,7 +215,7 @@ class KafkaPump[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor 
       nonEmptyTP.foreach { case (_, ref, messages) => ref ! Messages(messages) }
       requests = emptyTP.map { case (tp, ref, _) => (tp, ref) }
 
-      if(requests.isEmpty) {
+      if (requests.isEmpty) {
         schedulePoll()
       }
       else {
