@@ -7,9 +7,10 @@ package akka.kafka.internal
 import java.util
 
 import akka.Done
-import akka.actor.{Actor, ActorRef, Props}
+import akka.actor.{Actor, ActorRef, Props, Terminated}
 import akka.event.LoggingReceive
 import akka.kafka.ConsumerSettings
+import akka.kafka.internal.ByPartitionActor.RegisterSubSource
 import akka.kafka.scaladsl.Consumer.Control
 import akka.stream.actor.ActorPublisher
 import akka.stream.actor.ActorPublisherMessage.{Cancel, Request}
@@ -21,7 +22,11 @@ import scala.annotation.tailrec
 import scala.collection.{immutable, _}
 import scala.concurrent.Future
 
-class SubSourceActor[K, V](topic: TopicPartition, kafkaPump: ActorRef) extends ActorPublisher[ConsumerRecord[K, V]] {
+object SubSourceActor {
+  case object Complete
+}
+class SubSourceActor[K, V](mainSource: ActorRef, tp: TopicPartition, kafkaPump: ActorRef) extends ActorPublisher[ConsumerRecord[K, V]] {
+  import SubSourceActor._
   var buffer: Iterator[ConsumerRecord[K, V]] = Iterator.empty
   override def receive: Receive = normal
 
@@ -32,6 +37,7 @@ class SubSourceActor[K, V](topic: TopicPartition, kafkaPump: ActorRef) extends A
       pump()
     }
   }
+
   def normal: Receive = LoggingReceive {
     case KafkaPump.Messages(msgs) =>
       val newMessages = msgs.asInstanceOf[Iterator[ConsumerRecord[K, V]]]
@@ -40,13 +46,21 @@ class SubSourceActor[K, V](topic: TopicPartition, kafkaPump: ActorRef) extends A
     case Request(_) =>
       pump()
       if (!buffer.hasNext && totalDemand > 0) {
-        kafkaPump ! KafkaPump.Fetch(List(topic))
+        kafkaPump ! KafkaPump.RequestMessages(List(tp))
       }
     case Cancel => context.stop(self)
-    case _ =>
+    case Complete => onCompleteThenStop()
+  }
+
+  override def preStart(): Unit = {
+    super.preStart()
+    mainSource ! RegisterSubSource(tp)
   }
 }
 
+object ByPartitionActor {
+  case class RegisterSubSource(tp: TopicPartition)
+}
 class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPublisher[(TopicPartition, Source[ConsumerRecord[K, V], Control])] {
   var kafkaPump: ActorRef = _
 
@@ -56,10 +70,10 @@ class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPubl
     kafkaPump ! KafkaPump.Subscribe(settings.topics.toList)
   }
 
-  override def receive: Receive = normal(immutable.Queue.empty)
+  override def receive: Receive = normal
 
   def createSource(tp: TopicPartition): Source[ConsumerRecord[K, V], Control] = {
-    Source.actorPublisher(Props(new SubSourceActor(tp, kafkaPump)))
+    Source.actorPublisher(Props(new SubSourceActor(self, tp, kafkaPump)))
       .mapMaterializedValue(ref => new Control {
         override def stop(): Future[Done] = ???
         override def shutdown(): Future[Done] = ???
@@ -68,31 +82,39 @@ class ByPartitionActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPubl
   }
 
   @tailrec
-  private def pump(buffer: immutable.Queue[TopicPartition]): immutable.Queue[TopicPartition] = {
+  private def pump(): Unit = {
     if (buffer.nonEmpty && totalDemand > 0) {
       val (tp, remains) = buffer.dequeue
+      buffer = remains
       onNext((tp, createSource(tp)))
-      pump(remains)
-    }
-    else {
-      buffer
+      pump()
     }
   }
 
-  def normal(buffer: immutable.Queue[TopicPartition]): Receive = LoggingReceive {
+  var buffer: immutable.Queue[TopicPartition] = immutable.Queue.empty
+  var children: Map[TopicPartition, ActorRef] = immutable.Map.empty
+  def normal: Receive = LoggingReceive {
+    case RegisterSubSource(tp) =>
+      context.watch(sender)
+      children += (tp -> sender)
     case KafkaPump.Assigned(tps) =>
-      val newBuffer = buffer.enqueue(tps.to[immutable.Iterable])
-      context.become(
-        normal(pump(newBuffer))
-      )
-    case KafkaPump.Revoked(tps) => context.become(
-      normal(buffer.filter(x => tps.contains(x)))
-    )
-    case Request(_) => context.become(
-      normal(pump(buffer))
-    )
+      buffer = buffer.enqueue(tps.to[immutable.Iterable])
+      pump()
+    case KafkaPump.Revoked(tps) =>
+      tps.foreach { tp =>
+        println(s"Processing $tp. ${children.get(tp)}. $children")
+        children.get(tp) match {
+          case Some(ref) =>
+            println(s"Stop")
+            context.stop(ref)
+          case None =>
+            println(s"Filtering")
+            buffer = buffer.filter(x => tps.contains(x))
+        }
+      }
+    case Terminated(ref) => buffer = buffer.filter(_ != ref)
+    case Request(_) => pump()
     case Cancel => context.stop(self)
-    case x => println(s"Got unhandled message $x")
   }
 }
 
@@ -101,8 +123,8 @@ object KafkaPump {
   case class Revoked(partition: List[TopicPartition])
   case class Messages[K, V](messages: Iterator[ConsumerRecord[K, V]])
   case class Subscribe(topics: List[String])
-  case class Fetch(topics: List[TopicPartition])
-  private object Poll
+  case class RequestMessages(topics: List[TopicPartition])
+  private case object Poll
 }
 
 class KafkaPump[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor {
@@ -137,11 +159,10 @@ class KafkaPump[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor 
         if (partitionsToFetch.contains(tp)) consumer.resume(tp)
         else consumer.pause(tp)
       }
+      val rawResult = consumer.poll(pollTimeout().toMillis)
 
-      val result = consumer
-        .poll(pollTimeout().toMillis)
-        .groupBy(x => (x.topic(), x.partition()))
-
+      //push this into separate actor or thread to provide maximum fetching speed
+      val result = rawResult.groupBy(x => (x.topic(), x.partition()))
       val (nonEmptyTP, emptyTP) = requests.map {
         case (topics, ref) =>
           val messages = topics.toIterator.flatMap { tp =>
@@ -149,12 +170,16 @@ class KafkaPump[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor 
           }
           (topics, ref, messages)
       }.partition(_._3.hasNext)
-
       nonEmptyTP.foreach { case (_, ref, messages) => ref ! Messages(messages) }
       requests = emptyTP.map { case (tp, ref, _) => (tp, ref) }
 
-      schedulePoll()
-    case Fetch(topics) => requests = (topics -> sender) :: requests
+      if(requests.isEmpty) {
+        schedulePoll()
+      }
+      else {
+        self ! Poll
+      }
+    case RequestMessages(topics) => requests = (topics -> sender) :: requests
   }
 
   override def preStart(): Unit = {

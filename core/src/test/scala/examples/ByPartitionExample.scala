@@ -36,7 +36,7 @@ object ByPartitionExample extends App {
         println(s"Starting - $tp")
         s.map { x =>
             println(s"Got message - ${x.topic()}, ${x.partition()}, ${new BigInteger(x.key()).longValue()}")
-            Thread.sleep(200)
+            Thread.sleep(1200)
             x
           }
           .toMat(Sink.ignore)(Keep.right)
