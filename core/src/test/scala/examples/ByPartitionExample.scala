@@ -6,11 +6,14 @@ package examples
  */
 import java.math.BigInteger
 
-import akka.actor.ActorSystem
+import akka.actor.{ActorSystem, Props}
 import akka.kafka.ConsumerSettings
-import akka.kafka.internal.ByPartitionStage
+import akka.kafka.internal.ByPartitionActor
+import akka.kafka.scaladsl.Consumer.Control
 import akka.stream.scaladsl.{Keep, Sink, Source}
 import akka.stream.{ActorMaterializer, ActorMaterializerSettings}
+import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, StringDeserializer}
 
 object ByPartitionExample extends App {
@@ -20,13 +23,14 @@ object ByPartitionExample extends App {
 
   import scala.collection.JavaConversions._
 
-  Source.fromGraph(new ByPartitionStage[Array[Byte], String](
-    ConsumerSettings
-      .create(as, new ByteArrayDeserializer, new StringDeserializer, Set("proto4.bss"))
-      .withBootstrapServers("k1.c.test:9092")
-      .withClientId(System.currentTimeMillis().toString)
-      .withGroupId("test1")
-  ))
+  val settings =  ConsumerSettings
+    .create(as, new ByteArrayDeserializer, new StringDeserializer, Set("proto4.bss"))
+    .withBootstrapServers("k1.c.test:9092")
+    .withClientId(System.currentTimeMillis().toString)
+    .withGroupId("test1")
+
+  val x = Source
+    .actorPublisher[(TopicPartition, Source[ConsumerRecord[Array[Byte], String], Control])](Props(new ByPartitionActor(settings)))
     .map {
       case (tp, s) =>
         println(s"Starting - $tp")

@@ -14,4 +14,7 @@
     <root level="INFO">
         <appender-ref ref="STDOUT" />
     </root>
+    <logger name="akka.kafka.internal" level="DEBUG" />
+    <logger name="akka.kafka.internal.KafkaPump" level="INFO" />
+
 </configuration>
