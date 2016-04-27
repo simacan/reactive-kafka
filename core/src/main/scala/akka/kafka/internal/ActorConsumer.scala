@@ -10,27 +10,79 @@ import akka.Done
 import akka.actor.{Actor, ActorRef, ActorSystem, Cancellable, Props, Status, Terminated}
 import akka.event.LoggingReceive
 import akka.kafka.ConsumerSettings
+import akka.kafka.internal.ConsumerStage.{CommittableOffsetBatchImpl, CommittableOffsetImpl, Committer}
 import akka.kafka.internal.TopicPartitionSourceActor.RegisterSubSource
-import akka.kafka.scaladsl.Consumer.Control
+import akka.kafka.scaladsl.Consumer
+import akka.kafka.scaladsl.Consumer.{ClientTopicPartition, CommittableMessage, Control, PartitionOffset}
 import akka.stream.actor.ActorPublisher
 import akka.stream.actor.ActorPublisherMessage.{Cancel, Request}
 import akka.stream.scaladsl.Source
+import akka.util.Timeout
 import org.apache.kafka.clients.consumer._
 import org.apache.kafka.common.TopicPartition
 
 import scala.annotation.tailrec
 import scala.collection.immutable
+import scala.concurrent.duration.DurationInt
 import scala.concurrent.{Future, Promise}
 
-object SourceActor {
-  def apply[K, V](settings: ConsumerSettings[K, V])(implicit as: ActorSystem): Source[ConsumerRecord[K, V], Control] = {
-    Source.actorPublisher[ConsumerRecord[K, V]](Props(new SourceActor(settings)))
-      .mapMaterializedValue(ActorControl(_))
-
+trait PlainMessageBuilder[K, V] { self: SourceActor[K, V, ConsumerRecord[K, V]] =>
+  override def createMessage(rec: ConsumerRecord[K, V]) = rec
+}
+trait CommittableMessageBuilder[K, V] { self: SourceActor[K, V, CommittableMessage[K, V]] =>
+  override def createMessage(rec: ConsumerRecord[K, V]) = {
+    val offset = Consumer.PartitionOffset(
+      ClientTopicPartition(
+        clientId = settings.properties(ConsumerConfig.CLIENT_ID_CONFIG),
+        topic = rec.topic,
+        partition = rec.partition
+      ),
+      offset = rec.offset
+    )
+    val committable = CommittableOffsetImpl(offset)(new Committer {
+      import akka.pattern.ask
+      import context.dispatcher
+      implicit val timeout = Timeout(1.minute)
+      override def commit(offset: PartitionOffset): Future[Done] = {
+        val result = kafka ? KafkaActor.Commit(Map(
+          new TopicPartition(offset.key.topic, offset.key.partition) -> offset.offset
+        ))
+        result
+          .map(
+            _ => Done
+          )
+      }
+      override def commit(batch: CommittableOffsetBatchImpl): Future[Done] = {
+        val result = kafka ? KafkaActor.Commit(batch.offsets.map {
+          case (ctp, offset) => new TopicPartition(ctp.topic, ctp.partition) -> offset
+        })
+        result.map(_ => Done)
+      }
+    })
+    Consumer.CommittableMessage(rec.key, rec.value, committable)
   }
 }
 
-class SourceActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPublisher[ConsumerRecord[K, V]] {
+object SourceActor {
+  private class PlainSourceActor[K, V, MSG](settings: ConsumerSettings[K, V])
+    extends SourceActor[K, V, ConsumerRecord[K, V]](settings)
+    with PlainMessageBuilder[K, V]
+  private class CommittableSourceActor[K, V](settings: ConsumerSettings[K, V])
+    extends SourceActor[K, V, CommittableMessage[K, V]](settings)
+    with CommittableMessageBuilder[K, V]
+
+  def plain[K, V](settings: ConsumerSettings[K, V])(implicit as: ActorSystem) = {
+    Source.actorPublisher[ConsumerRecord[K, V]](Props(new PlainSourceActor(settings)))
+      .mapMaterializedValue(ActorControl(_))
+  }
+
+  def committable[K, V](settings: ConsumerSettings[K, V])(implicit as: ActorSystem) = {
+    Source.actorPublisher[CommittableMessage[K, V]](Props(new CommittableSourceActor(settings)))
+      .mapMaterializedValue(ActorControl(_))
+  }
+}
+
+abstract case class SourceActor[K, V, MSG](settings: ConsumerSettings[K, V]) extends ActorPublisher[MSG] {
   var kafka: ActorRef = _
   var tps = Set.empty[TopicPartition]
   var buffer: Iterator[ConsumerRecord[K, V]] = Iterator.empty
@@ -49,11 +101,13 @@ class SourceActor[K, V](settings: ConsumerSettings[K, V]) extends ActorPublisher
       }
       else {
         val msg = buffer.next()
-        onNext(msg)
+        onNext(createMessage(msg))
         pump()
       }
     }
   }
+
+  def createMessage(rec: ConsumerRecord[K, V]): MSG
 
   override def receive: Receive = working
 
@@ -291,6 +345,8 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
       schedulePoll()
     }
     else {
+      scheduled.foreach(_.cancel())
+      scheduled = None
       self ! Poll
     }
   }
