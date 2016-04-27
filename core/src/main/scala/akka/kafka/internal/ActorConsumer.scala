@@ -4,32 +4,28 @@
  */
 package akka.kafka.internal
 
-import java.util
-
 import akka.Done
-import akka.actor.{Actor, ActorRef, ActorSystem, Cancellable, Props, Status, Terminated}
+import akka.actor.{Actor, ActorRef, ActorSystem, Props, Terminated}
 import akka.event.LoggingReceive
 import akka.kafka.ConsumerSettings
-import akka.kafka.internal.ConsumerStage.{CommittableOffsetBatchImpl, CommittableOffsetImpl, Committer}
-import akka.kafka.internal.TopicPartitionSourceActor.RegisterSubSource
+import akka.kafka.internal.ConsumerStage.CommittableOffsetImpl
 import akka.kafka.scaladsl.Consumer
-import akka.kafka.scaladsl.Consumer.{ClientTopicPartition, CommittableMessage, Control, PartitionOffset}
+import akka.kafka.scaladsl.Consumer.{ClientTopicPartition, CommittableMessage, Control}
 import akka.stream.actor.ActorPublisher
 import akka.stream.actor.ActorPublisherMessage.{Cancel, Request}
 import akka.stream.scaladsl.Source
-import akka.util.Timeout
 import org.apache.kafka.clients.consumer._
 import org.apache.kafka.common.TopicPartition
 
 import scala.annotation.tailrec
 import scala.collection.immutable
-import scala.concurrent.duration.DurationInt
 import scala.concurrent.{Future, Promise}
 
 trait PlainMessageBuilder[K, V] { self: SourceActor[K, V, ConsumerRecord[K, V]] =>
   override def createMessage(rec: ConsumerRecord[K, V]) = rec
 }
 trait CommittableMessageBuilder[K, V] { self: SourceActor[K, V, CommittableMessage[K, V]] =>
+  val committer = KafkaActor.Committer(kafka)(context.dispatcher)
   override def createMessage(rec: ConsumerRecord[K, V]) = {
     val offset = Consumer.PartitionOffset(
       ClientTopicPartition(
@@ -39,46 +35,7 @@ trait CommittableMessageBuilder[K, V] { self: SourceActor[K, V, CommittableMessa
       ),
       offset = rec.offset
     )
-    val committable = CommittableOffsetImpl(offset)(new Committer {
-      import akka.pattern.ask
-      import context.dispatcher
-      implicit val timeout = Timeout(1.minute)
-      override def commit(offset: PartitionOffset): Future[Done] = {
-        val result = kafka ? KafkaActor.Commit(Map(
-          new TopicPartition(offset.key.topic, offset.key.partition) -> offset.offset
-        ))
-        result
-          .map(
-            _ => Done
-          )
-      }
-      override def commit(batch: CommittableOffsetBatchImpl): Future[Done] = {
-        val result = kafka ? KafkaActor.Commit(batch.offsets.map {
-          case (ctp, offset) => new TopicPartition(ctp.topic, ctp.partition) -> offset
-        })
-        result.map(_ => Done)
-      }
-    })
-    Consumer.CommittableMessage(rec.key, rec.value, committable)
-  }
-}
-
-object SourceActor {
-  private class PlainSourceActor[K, V, MSG](settings: ConsumerSettings[K, V])
-    extends SourceActor[K, V, ConsumerRecord[K, V]](settings)
-    with PlainMessageBuilder[K, V]
-  private class CommittableSourceActor[K, V](settings: ConsumerSettings[K, V])
-    extends SourceActor[K, V, CommittableMessage[K, V]](settings)
-    with CommittableMessageBuilder[K, V]
-
-  def plain[K, V](settings: ConsumerSettings[K, V])(implicit as: ActorSystem) = {
-    Source.actorPublisher[ConsumerRecord[K, V]](Props(new PlainSourceActor(settings)))
-      .mapMaterializedValue(ActorControl(_))
-  }
-
-  def committable[K, V](settings: ConsumerSettings[K, V])(implicit as: ActorSystem) = {
-    Source.actorPublisher[CommittableMessage[K, V]](Props(new CommittableSourceActor(settings)))
-      .mapMaterializedValue(ActorControl(_))
+    Consumer.CommittableMessage(rec.key, rec.value, CommittableOffsetImpl(offset)(committer))
   }
 }
 
@@ -140,39 +97,6 @@ abstract case class SourceActor[K, V, MSG](settings: ConsumerSettings[K, V]) ext
 
 }
 
-class TopicPartitionSubSourceActor[K, V](mainSource: ActorRef, tp: TopicPartition, kafka: ActorRef)
-    extends ActorPublisher[ConsumerRecord[K, V]] {
-  var buffer: Iterator[ConsumerRecord[K, V]] = Iterator.empty
-  override def receive: Receive = normal
-
-  @tailrec
-  private def pump(): Unit = {
-    if (buffer.hasNext && totalDemand > 0) {
-      onNext(buffer.next())
-      pump()
-    }
-  }
-
-  def normal: Receive = LoggingReceive {
-    case KafkaActor.Messages(msgs) =>
-      val newMessages = msgs.asInstanceOf[Iterator[ConsumerRecord[K, V]]]
-      buffer = buffer ++ newMessages
-      pump()
-    case Request(_) =>
-      pump()
-      if (!buffer.hasNext && totalDemand > 0) {
-        kafka ! KafkaActor.RequestMessages(Set(tp))
-      }
-    case Cancel => context.stop(self)
-    case ActorControl.Stop => onComplete()
-  }
-
-  override def preStart(): Unit = {
-    super.preStart()
-    mainSource ! RegisterSubSource(tp)
-  }
-}
-
 object TopicPartitionSourceActor {
   case class RegisterSubSource(tp: TopicPartition)
 
@@ -180,6 +104,40 @@ object TopicPartitionSourceActor {
     Source.actorPublisher[(TopicPartition, Source[ConsumerRecord[K, V], Control])](Props(new TopicPartitionSourceActor(settings)))
       .mapMaterializedValue(ActorControl(_))
   }
+
+  class SubSourceActor[K, V](mainSource: ActorRef, tp: TopicPartition, kafka: ActorRef)
+    extends ActorPublisher[ConsumerRecord[K, V]] {
+    var buffer: Iterator[ConsumerRecord[K, V]] = Iterator.empty
+    override def receive: Receive = normal
+
+    @tailrec
+    private def pump(): Unit = {
+      if (buffer.hasNext && totalDemand > 0) {
+        onNext(buffer.next())
+        pump()
+      }
+    }
+
+    def normal: Receive = LoggingReceive {
+      case KafkaActor.Messages(msgs) =>
+        val newMessages = msgs.asInstanceOf[Iterator[ConsumerRecord[K, V]]]
+        buffer = buffer ++ newMessages
+        pump()
+      case Request(_) =>
+        pump()
+        if (!buffer.hasNext && totalDemand > 0) {
+          kafka ! KafkaActor.RequestMessages(Set(tp))
+        }
+      case Cancel => context.stop(self)
+      case ActorControl.Stop => onComplete()
+    }
+
+    override def preStart(): Unit = {
+      super.preStart()
+      mainSource ! RegisterSubSource(tp)
+    }
+  }
+
 }
 class TopicPartitionSourceActor[K, V](settings: ConsumerSettings[K, V])
     extends ActorPublisher[(TopicPartition, Source[ConsumerRecord[K, V], Control])] {
@@ -201,7 +159,7 @@ class TopicPartitionSourceActor[K, V](settings: ConsumerSettings[K, V])
   override def receive: Receive = normal
 
   def createSource(tp: TopicPartition): Source[ConsumerRecord[K, V], Control] = {
-    Source.actorPublisher(Props(new TopicPartitionSubSourceActor(self, tp, kafka)))
+    Source.actorPublisher(Props(new SubSourceActor(self, tp, kafka)))
       .mapMaterializedValue(ActorControl(_)(context.system))
   }
 
@@ -251,114 +209,6 @@ class TopicPartitionSourceActor[K, V](settings: ConsumerSettings[K, V])
   }
 }
 
-object KafkaActor {
-  //requests
-  case class Subscribe(topics: Set[String])
-  case class RequestMessages(topics: Set[TopicPartition])
-  object RequestAnyMessages
-  case class Commit(offsets: Map[TopicPartition, Long])
-  //responses
-  case class Assigned(partition: List[TopicPartition])
-  case class Revoked(partition: List[TopicPartition])
-  case class Messages[K, V](messages: Iterator[ConsumerRecord[K, V]])
-  case class Committed(offsets: Map[TopicPartition, OffsetAndMetadata])
-  //internal
-  private case object Poll
-}
-
-class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor {
-
-  import KafkaActor._
-
-  import scala.collection.JavaConversions._
-  import scala.collection.JavaConverters._
-  import scala.concurrent.duration._
-
-  def pollTimeout() = 100.millis
-
-  def pollDelay() = 100.millis
-
-  private var requests = List.empty[(Set[TopicPartition], ActorRef)]
-  var consumer: KafkaConsumer[K, V] = _
-
-  def receive: Receive = LoggingReceive {
-    case Commit(offsets) =>
-      val commitMap = offsets.mapValues(new OffsetAndMetadata(_))
-      val reply = sender
-      consumer.commitAsync(commitMap, new OffsetCommitCallback {
-        override def onComplete(offsets: util.Map[TopicPartition, OffsetAndMetadata], exception: Exception): Unit = {
-          if (exception != null) reply ! Status.Failure(exception)
-          else reply ! Committed(offsets.asScala.toMap)
-        }
-      })
-      //right now we can not store commits in consumer - https://issues.apache.org/jira/browse/KAFKA-3412
-      poll()
-
-    case Subscribe(topics) =>
-      val reply = sender
-      consumer.subscribe(topics.toList, new ConsumerRebalanceListener {
-        override def onPartitionsAssigned(partitions: util.Collection[TopicPartition]): Unit = {
-          reply ! Assigned(partitions.toList)
-        }
-
-        override def onPartitionsRevoked(partitions: util.Collection[TopicPartition]): Unit = {
-          //todo remove these topics from requests
-          reply ! Revoked(partitions.toList)
-        }
-      })
-    case Poll => poll()
-    case RequestMessages(topics) => requests ::= (topics -> sender)
-  }
-
-  override def preStart(): Unit = {
-    super.preStart()
-    consumer = consumerFactory()
-    schedulePoll()
-  }
-
-  override def postStop(): Unit = {
-    consumer.close()
-    super.postStop()
-  }
-
-  def poll() = {
-    val partitionsToFetch = requests.flatMap(_._1).toSet
-    consumer.assignment().foreach { tp =>
-      if (partitionsToFetch.contains(tp)) consumer.resume(tp)
-      else consumer.pause(tp)
-    }
-    val rawResult = consumer.poll(pollTimeout().toMillis)
-
-    //push this into separate actor or thread to provide maximum fetching speed
-    val result = rawResult.groupBy(x => (x.topic(), x.partition()))
-    val (nonEmptyTP, emptyTP) = requests.map {
-      case (topics, ref) =>
-        val messages = topics.toIterator.flatMap { tp =>
-          result.getOrElse((tp.topic(), tp.partition()), Iterator.empty)
-        }
-        (topics, ref, messages)
-    }.partition(_._3.hasNext)
-    nonEmptyTP.foreach { case (_, ref, messages) => ref ! Messages(messages) }
-    requests = emptyTP.map { case (tp, ref, _) => (tp, ref) }
-
-    if (requests.isEmpty) {
-      schedulePoll()
-    }
-    else {
-      scheduled.foreach(_.cancel())
-      scheduled = None
-      self ! Poll
-    }
-  }
-
-  var scheduled: Option[Cancellable] = None
-  def schedulePoll(): Unit = {
-    if (scheduled.isEmpty) {
-      import context.dispatcher
-      scheduled = Some(context.system.scheduler.scheduleOnce(pollDelay(), self, Poll))
-    }
-  }
-}
 
 object ActorControl {
   case object Stop

@@ -4,14 +4,13 @@ package examples
  * Copyright (C) 2014 - 2016 Softwaremill <http://softwaremill.com>
  * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
  */
-import java.math.BigInteger
-
 import akka.actor.ActorSystem
 import akka.kafka.ConsumerSettings
-import akka.kafka.internal.{SourceActor, TopicPartitionSourceActor}
+import akka.kafka.internal.ActorAPI
+import akka.kafka.scaladsl.Consumer.CommittableOffsetBatch
 import akka.stream.scaladsl.{Keep, Sink}
 import akka.stream.{ActorMaterializer, ActorMaterializerSettings}
-import org.apache.kafka.common.serialization.{ByteArrayDeserializer, LongDeserializer, StringDeserializer}
+import org.apache.kafka.common.serialization.{LongDeserializer, StringDeserializer}
 
 import scala.util.{Failure, Success}
 
@@ -28,9 +27,12 @@ object UsualSourceExample extends App {
     .withClientId(System.currentTimeMillis().toString)
     .withGroupId("test1")
 
-  val (control, f) = SourceActor.committable[java.lang.Long, String](settings)
-    .map { x => println(x); Thread.sleep(1000); x }
-    .mapAsync(1)(x => x.committableOffset.commit())
+  val (control, f) = ActorAPI.committable[java.lang.Long, String](settings)
+    .map { x => println(x.committableOffset.partitionOffset.offset); Thread.sleep(1000); x }
+    .batch(max = 5, first => CommittableOffsetBatch.empty.updated(first.committableOffset)) { (batch, elem) =>
+      batch.updated(elem.committableOffset)
+    }
+    .mapAsync(1)(x => x.commit())
     .toMat(Sink.ignore)(Keep.both)
     .run()
 
