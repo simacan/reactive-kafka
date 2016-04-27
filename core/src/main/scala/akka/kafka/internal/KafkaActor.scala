@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2014 - 2016 Softwaremill <http://softwaremill.com>
+ * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
+ */
 package akka.kafka.internal
 
 import java.util
@@ -48,16 +52,14 @@ object KafkaActor {
 }
 
 class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor {
-
   import KafkaActor._
 
   import scala.collection.JavaConversions._
   import scala.collection.JavaConverters._
   import scala.concurrent.duration._
 
-  def pollTimeout() = 200.millis
-
-  def pollDelay() = 500.millis
+  def pollTimeout() = 10.millis
+  def pollDelay() = 50.millis
 
   private var requests = Map.empty[TopicPartition, ActorRef]
   var consumer: KafkaConsumer[K, V] = _
@@ -68,7 +70,6 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
       val reply = sender
       consumer.commitAsync(commitMap, new OffsetCommitCallback {
         override def onComplete(offsets: util.Map[TopicPartition, OffsetAndMetadata], exception: Exception): Unit = {
-          println(s"Commit completed $commitMap")
           if (exception != null) reply ! Status.Failure(exception)
           else reply ! Committed(offsets.asScala.toMap)
         }
@@ -111,7 +112,10 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
       if (partitionsToFetch.contains(tp)) consumer.resume(tp)
       else consumer.pause(tp)
     }
+
+    //////////////////////////////////
     val rawResult = consumer.poll(pollTimeout().toMillis)
+    //////////////////////////////////
 
     //push this into separate actor or thread to provide maximum fetching speed
     val result = rawResult.groupBy(x => (x.topic(), x.partition()))
@@ -123,36 +127,32 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
       .map { case (ref, refAndTps) => (ref, refAndTps.map { case (_ref, tps) => tps }) } //leave only tps
 
     //send messages to actors
-    replyByTP.foreach { case (ref, tps) =>
-      val messages = tps.foldLeft[Iterator[ConsumerRecord[K, V]]](Iterator.empty) {
-        case (acc, tp) =>
-          val tpMessages = result
-            .get((tp.topic, tp.partition))
-            .map(_.toIterator)
-            .getOrElse(Iterator.empty)
-          if(acc.isEmpty) tpMessages
-          else acc ++ tpMessages
-      }
-      if(messages.nonEmpty) {
-        ref ! Messages(messages)
-      }
+    replyByTP.foreach {
+      case (ref, tps) =>
+        val messages = tps.foldLeft[Iterator[ConsumerRecord[K, V]]](Iterator.empty) {
+          case (acc, tp) =>
+            val tpMessages = result
+              .get((tp.topic, tp.partition))
+              .map(_.toIterator)
+              .getOrElse(Iterator.empty)
+            if (acc.isEmpty) tpMessages
+            else acc ++ tpMessages
+        }
+        if (messages.nonEmpty) {
+          ref ! Messages(messages)
+        }
     }
     //remove tps for which we got messages
     requests --= result.keys.map(x => new TopicPartition(x._1, x._2))
 
-    if (requests.isEmpty) {
-      schedulePoll()
-    }
-    else if(forceSchedule) {
-      self ! Poll
-    }
+    if (requests.isEmpty) schedulePoll()
+    else if (forceSchedule) self ! Poll
   }
 
   var scheduled: Option[Cancellable] = None
   def schedulePoll(): Unit = {
     if (scheduled.isEmpty) {
       import context.dispatcher
-      println("schedule poll")
       scheduled = Some(context.system.scheduler.scheduleOnce(pollDelay(), self, Poll))
     }
   }

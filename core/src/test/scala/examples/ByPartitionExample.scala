@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2014 - 2016 Softwaremill <http://softwaremill.com>
+ * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
+ */
 package examples
 
 /*
@@ -20,7 +24,7 @@ object ByPartitionExample extends App {
 
   import scala.collection.JavaConversions._
 
-  val settings =  ConsumerSettings
+  val settings = ConsumerSettings
     .create(as, new ByteArrayDeserializer, new StringDeserializer, Set("proto4.bss"))
     .withBootstrapServers("k1.c.test:9092")
     .withClientId(System.currentTimeMillis().toString)
@@ -31,10 +35,10 @@ object ByPartitionExample extends App {
       case (tp, s) =>
         println(s"Starting - $tp")
         s.map { x =>
-            println(s"Got message - ${x.topic()}, ${x.partition()}, ${new BigInteger(x.key()).longValue()}")
-            Thread.sleep(1200)
-            x
-          }
+          println(s"Got message - ${x.topic()}, ${x.partition()}, ${new BigInteger(x.key()).longValue()}")
+          Thread.sleep(1200)
+          x
+        }
           .toMat(Sink.ignore)(Keep.right)
           .mapMaterializedValue((tp, _))
           .run()

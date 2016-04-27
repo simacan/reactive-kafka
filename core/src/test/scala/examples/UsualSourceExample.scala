@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2014 - 2016 Softwaremill <http://softwaremill.com>
+ * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
+ */
 package examples
 
 /*
@@ -7,6 +11,7 @@ package examples
 import akka.actor.ActorSystem
 import akka.kafka.ConsumerSettings
 import akka.kafka.internal.ActorAPI
+import akka.kafka.scaladsl.Consumer
 import akka.kafka.scaladsl.Consumer.CommittableOffsetBatch
 import akka.stream.scaladsl.{Keep, Sink}
 import akka.stream.{ActorMaterializer, ActorMaterializerSettings}
@@ -27,7 +32,7 @@ object UsualSourceExample extends App {
     .withClientId(System.currentTimeMillis().toString)
     .withGroupId("test1")
 
-  val (control, f) = ActorAPI.committable[java.lang.Long, String](settings)
+  val (control, f) = Consumer.committableSource[java.lang.Long, String](settings)
     .map { x => println(x.committableOffset.partitionOffset.offset); Thread.sleep(1000); x }
     .batch(max = 5, first => CommittableOffsetBatch.empty.updated(first.committableOffset)) { (batch, elem) =>
       batch.updated(elem.committableOffset)

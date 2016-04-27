@@ -99,7 +99,7 @@ object ConsumerSettings {
  * `apply` and `create` functions for convenient construction of the settings, together with
  * the `with` methods.
  */
-final class ConsumerSettings[K, V](
+class ConsumerSettings[K, V](
     val properties: Map[String, String],
     val keyDeserializer: Deserializer[K],
     val valueDeserializer: Deserializer[V],

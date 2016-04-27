@@ -106,7 +106,7 @@ object TopicPartitionSourceActor {
   }
 
   class SubSourceActor[K, V](mainSource: ActorRef, tp: TopicPartition, kafka: ActorRef)
-    extends ActorPublisher[ConsumerRecord[K, V]] {
+      extends ActorPublisher[ConsumerRecord[K, V]] {
     var buffer: Iterator[ConsumerRecord[K, V]] = Iterator.empty
     override def receive: Receive = normal
 
@@ -137,8 +137,8 @@ object TopicPartitionSourceActor {
       mainSource ! RegisterSubSource(tp)
     }
   }
-
 }
+
 class TopicPartitionSourceActor[K, V](settings: ConsumerSettings[K, V])
     extends ActorPublisher[(TopicPartition, Source[ConsumerRecord[K, V], Control])] {
   import TopicPartitionSourceActor._
@@ -209,7 +209,6 @@ class TopicPartitionSourceActor[K, V](settings: ConsumerSettings[K, V])
   }
 }
 
-
 object ActorControl {
   case object Stop
   case object Stopped
@@ -220,6 +219,10 @@ case class ActorControl(ref: ActorRef)(implicit as: ActorSystem) extends Control
   val _stop = Promise[Done]
 
   val proxyActor = as.actorOf(Props(new Actor {
+    override def preStart(): Unit = {
+      context.watch(ref)
+    }
+
     override def receive: Receive = {
       case Terminated(`ref`) => _shutdown.trySuccess(Done)
       case Stopped => _stop.trySuccess(Done)
