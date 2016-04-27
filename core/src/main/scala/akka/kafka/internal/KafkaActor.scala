@@ -88,8 +88,11 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
           reply ! Revoked(partitions.toList)
         }
       })
-    case Poll => poll()
-    case RequestMessages(topics) => requests ++= topics.map(_ -> sender()).toMap
+    case Poll =>
+      poll()
+    case RequestMessages(topics) =>
+      requests ++= topics.map(_ -> sender()).toMap
+      poll()
   }
 
   override def preStart(): Unit = {

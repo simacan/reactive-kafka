@@ -53,7 +53,7 @@ abstract case class SourceActor[K, V, MSG](settings: ConsumerSettings[K, V]) ext
   @tailrec
   private def pump(): Unit = {
     if (totalDemand > 0) {
-      if (!buffer.nonEmpty) {
+      if (!buffer.hasNext) {
         kafka ! KafkaActor.RequestMessages(tps)
       }
       else {
@@ -76,7 +76,12 @@ abstract case class SourceActor[K, V, MSG](settings: ConsumerSettings[K, V]) ext
       tps --= newTps
       pump()
     case KafkaActor.Messages(msgs) =>
-      buffer = buffer ++ msgs.asInstanceOf[Iterator[ConsumerRecord[K, V]]]
+      if (buffer.hasNext) {
+        buffer = buffer ++ msgs.asInstanceOf[Iterator[ConsumerRecord[K, V]]]
+      }
+      else {
+        buffer = msgs.asInstanceOf[Iterator[ConsumerRecord[K, V]]]
+      }
       pump()
     case Request(_) =>
       pump()
@@ -224,7 +229,9 @@ case class ActorControl(ref: ActorRef)(implicit as: ActorSystem) extends Control
     }
 
     override def receive: Receive = {
-      case Terminated(`ref`) => _shutdown.trySuccess(Done)
+      case Terminated(`ref`) =>
+        _shutdown.trySuccess(Done)
+        _stop.trySuccess(Done)
       case Stopped => _stop.trySuccess(Done)
     }
   }))
