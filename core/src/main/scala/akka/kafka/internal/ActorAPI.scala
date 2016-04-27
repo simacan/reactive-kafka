@@ -15,10 +15,9 @@ object ActorAPI {
     extends SourceActor[K, V, CommittableMessage[K, V]](settings)
     with CommittableMessageBuilder[K, V]
 
-  private def fromActor[T](ref: => ActorPublisher[T]) = {
+  private def fromActor[T](ref: => ActorPublisher[T])(implicit as: ActorSystem) = {
     Source.actorPublisher[T](Props(ref))
       .mapMaterializedValue(ActorControl(_))
-
   }
 
   def plain[K, V](settings: ConsumerSettings[K, V])(implicit as: ActorSystem) = {

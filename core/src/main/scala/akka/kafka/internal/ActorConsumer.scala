@@ -25,7 +25,7 @@ trait PlainMessageBuilder[K, V] { self: SourceActor[K, V, ConsumerRecord[K, V]] 
   override def createMessage(rec: ConsumerRecord[K, V]) = rec
 }
 trait CommittableMessageBuilder[K, V] { self: SourceActor[K, V, CommittableMessage[K, V]] =>
-  val committer = KafkaActor.Committer(kafka)(context.dispatcher)
+  lazy val committer = KafkaActor.Committer(kafka)(context.dispatcher)
   override def createMessage(rec: ConsumerRecord[K, V]) = {
     val offset = Consumer.PartitionOffset(
       ClientTopicPartition(
@@ -53,7 +53,7 @@ abstract case class SourceActor[K, V, MSG](settings: ConsumerSettings[K, V]) ext
   @tailrec
   private def pump(): Unit = {
     if (totalDemand > 0) {
-      if (!buffer.hasNext) {
+      if (!buffer.nonEmpty) {
         kafka ! KafkaActor.RequestMessages(tps)
       }
       else {
@@ -181,7 +181,7 @@ class TopicPartitionSourceActor[K, V](settings: ConsumerSettings[K, V])
       context.watch(sender)
       children += (tp -> sender)
     case KafkaActor.Assigned(tps) =>
-      buffer = buffer.enqueue(tps.to[immutable.Iterable])
+      buffer = buffer.enqueue(tps)
       pump()
     case KafkaActor.Revoked(tps) =>
       tps.foreach { tp =>

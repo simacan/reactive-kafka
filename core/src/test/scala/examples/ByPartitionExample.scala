@@ -44,7 +44,7 @@ object ByPartitionExample extends App {
     .run()
 
   f.onComplete(x => println(x))
-  Thread.sleep(10000)
+  Thread.sleep(1000000)
   control.shutdown()
 
 }

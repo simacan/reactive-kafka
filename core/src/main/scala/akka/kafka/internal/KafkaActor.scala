@@ -55,11 +55,11 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
   import scala.collection.JavaConverters._
   import scala.concurrent.duration._
 
-  def pollTimeout() = 10.millis
+  def pollTimeout() = 200.millis
 
-  def pollDelay() = 100.millis
+  def pollDelay() = 500.millis
 
-  private var requests = List.empty[(Set[TopicPartition], ActorRef)]
+  private var requests = Map.empty[TopicPartition, ActorRef]
   var consumer: KafkaConsumer[K, V] = _
 
   def receive: Receive = LoggingReceive {
@@ -84,12 +84,11 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
         }
 
         override def onPartitionsRevoked(partitions: util.Collection[TopicPartition]): Unit = {
-          //todo remove these topics from requests
           reply ! Revoked(partitions.toList)
         }
       })
     case Poll => poll()
-    case RequestMessages(topics) => requests ::= (topics -> sender)
+    case RequestMessages(topics) => requests ++= topics.map(_ -> sender()).toMap
   }
 
   override def preStart(): Unit = {
@@ -107,7 +106,7 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
     scheduled.foreach(_.cancel())
     scheduled = None
 
-    val partitionsToFetch = requests.flatMap(_._1).toSet
+    val partitionsToFetch = requests.keys.toSet
     consumer.assignment().foreach { tp =>
       if (partitionsToFetch.contains(tp)) consumer.resume(tp)
       else consumer.pause(tp)
@@ -116,15 +115,30 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
 
     //push this into separate actor or thread to provide maximum fetching speed
     val result = rawResult.groupBy(x => (x.topic(), x.partition()))
-    val (nonEmptyTP, emptyTP) = requests.map {
-      case (topics, ref) =>
-        val messages = topics.toIterator.flatMap { tp =>
-          result.getOrElse((tp.topic(), tp.partition()), Iterator.empty)
-        }
-        (topics, ref, messages)
-    }.partition(_._3.hasNext)
-    nonEmptyTP.foreach { case (_, ref, messages) => ref ! Messages(messages) }
-    requests = emptyTP.map { case (tp, ref, _) => (tp, ref) }
+
+    // split tps by reply actor
+    val replyByTP = requests.toSeq
+      .map(x => (x._2, x._1)) //inverse map
+      .groupBy(_._1) //group by reply
+      .map { case (ref, refAndTps) => (ref, refAndTps.map { case (_ref, tps) => tps }) } //leave only tps
+
+    //send messages to actors
+    replyByTP.foreach { case (ref, tps) =>
+      val messages = tps.foldLeft[Iterator[ConsumerRecord[K, V]]](Iterator.empty) {
+        case (acc, tp) =>
+          val tpMessages = result
+            .get((tp.topic, tp.partition))
+            .map(_.toIterator)
+            .getOrElse(Iterator.empty)
+          if(acc.isEmpty) tpMessages
+          else acc ++ tpMessages
+      }
+      if(messages.nonEmpty) {
+        ref ! Messages(messages)
+      }
+    }
+    //remove tps for which we got messages
+    requests --= result.keys.map(x => new TopicPartition(x._1, x._2))
 
     if (requests.isEmpty) {
       schedulePoll()
