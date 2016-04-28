@@ -259,6 +259,7 @@ class ConsumerTest(_system: ActorSystem)
     Await.result(control.shutdown(), remainingOrDefault)
   }
 
+  //looks like current implementation of batch committer is incorrect
   ignore should "support commit batching from more than one stage" in {
     val commitLog1 = new ConsumerMock.LogHandler()
     val commitLog2 = new ConsumerMock.LogHandler()
@@ -437,6 +438,7 @@ class ConsumerTest(_system: ActorSystem)
     }
   }
 
+  // not implemented yet
   ignore should "keep stage running after cancellation until all futures completed" in {
     val commitLog = new ConsumerMock.LogHandler()
     val mock = new ConsumerMock[K, V](commitLog)

@@ -4,34 +4,21 @@
  */
 package akka.kafka.internal
 
-import java.util
-import java.util.Collections
-import java.util.concurrent.TimeoutException
-
-import akka.{Done, NotUsed}
-import akka.kafka.ConsumerSettings
+import akka.Done
 import akka.kafka.scaladsl.Consumer
 import akka.kafka.scaladsl.Consumer.{ClientTopicPartition, CommittableOffsetBatch}
-import akka.stream._
-import akka.stream.stage._
-import org.apache.kafka.clients.consumer._
-import org.apache.kafka.common.TopicPartition
 
-import scala.collection.JavaConverters._
-import scala.concurrent.{Future, Promise}
-import scala.concurrent.duration._
-import scala.util.Try
-import scala.util.control.NonFatal
+import scala.concurrent.Future
 
 /**
  * INTERNAL API
  */
 private[kafka] object ConsumerStage {
 
-  final case class CommittableOffsetImpl(override val partitionOffset: Consumer.PartitionOffset)(val stage: Committer)
+  final case class CommittableOffsetImpl(override val partitionOffset: Consumer.PartitionOffset)(val committer: Committer)
       extends Consumer.CommittableOffset {
     override def commit(): Future[Done] =
-      stage.commit(partitionOffset)
+      committer.commit(partitionOffset)
   }
 
   trait Committer {
@@ -49,7 +36,7 @@ private[kafka] object ConsumerStage {
       val newOffsets = offsets.updated(key, committableOffset.partitionOffset.offset)
 
       val stage = committableOffset match {
-        case c: CommittableOffsetImpl => c.stage
+        case c: CommittableOffsetImpl => c.committer
         case _ => throw new IllegalArgumentException(
           s"Unknow CommittableOffset, got [${committableOffset.getClass.getName}], " +
             s"expected [${classOf[CommittableOffsetImpl].getName}]"

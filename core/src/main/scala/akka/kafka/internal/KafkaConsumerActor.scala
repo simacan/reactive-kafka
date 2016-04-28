@@ -18,7 +18,7 @@ import org.apache.kafka.common.TopicPartition
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
 
-object KafkaActor {
+object KafkaConsumerActor {
   //requests
   case class Subscribe(topics: Set[String])
   case class RequestMessages(topics: Set[TopicPartition])
@@ -31,28 +31,10 @@ object KafkaActor {
   case class Committed(offsets: Map[TopicPartition, OffsetAndMetadata])
   //internal
   private case object Poll
-
-  case class Committer(ref: ActorRef)(implicit ec: ExecutionContext) extends akka.kafka.internal.ConsumerStage.Committer {
-    import akka.pattern.ask
-
-    implicit val timeout = Timeout(1.minute)
-    override def commit(offset: PartitionOffset): Future[Done] = {
-      val result = ref ? KafkaActor.Commit(Map(
-        new TopicPartition(offset.key.topic, offset.key.partition) -> (offset.offset + 1)
-      ))
-      result.map(_ => Done)
-    }
-    override def commit(batch: CommittableOffsetBatchImpl): Future[Done] = {
-      val result = ref ? KafkaActor.Commit(batch.offsets.map {
-        case (ctp, offset) => new TopicPartition(ctp.topic, ctp.partition) -> (offset + 1)
-      })
-      result.map(_ => Done)
-    }
-  }
 }
 
-class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor {
-  import KafkaActor._
+class KafkaConsumerActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor {
+  import KafkaConsumerActor._
 
   import scala.collection.JavaConversions._
   import scala.collection.JavaConverters._
@@ -75,7 +57,7 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
         }
       })
       //right now we can not store commits in consumer - https://issues.apache.org/jira/browse/KAFKA-3412
-      poll(forceSchedule = false)
+      poll(immediatePoll = false)
 
     case Subscribe(topics) =>
       val reply = sender
@@ -106,7 +88,7 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
     super.postStop()
   }
 
-  def poll(forceSchedule: Boolean = true) = {
+  def poll(immediatePoll: Boolean = true) = {
     scheduled.foreach(_.cancel())
     scheduled = None
 
@@ -149,7 +131,7 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
     requests --= result.keys.map(x => new TopicPartition(x._1, x._2))
 
     if (requests.isEmpty) schedulePoll()
-    else if (forceSchedule) self ! Poll
+    else if (immediatePoll) self ! Poll
   }
 
   var scheduled: Option[Cancellable] = None
@@ -158,5 +140,23 @@ class KafkaActor[K, V](consumerFactory: () => KafkaConsumer[K, V]) extends Actor
       import context.dispatcher
       scheduled = Some(context.system.scheduler.scheduleOnce(pollDelay(), self, Poll))
     }
+  }
+}
+
+case class ActorCommitter(ref: ActorRef)(implicit ec: ExecutionContext) extends Committer {
+  import akka.pattern.ask
+
+  implicit val timeout = Timeout(1.minute)
+  override def commit(offset: PartitionOffset): Future[Done] = {
+    val result = ref ? KafkaConsumerActor.Commit(Map(
+      new TopicPartition(offset.key.topic, offset.key.partition) -> (offset.offset + 1)
+    ))
+    result.map(_ => Done)
+  }
+  override def commit(batch: CommittableOffsetBatchImpl): Future[Done] = {
+    val result = ref ? KafkaConsumerActor.Commit(batch.offsets.map {
+      case (ctp, offset) => new TopicPartition(ctp.topic, ctp.partition) -> (offset + 1)
+    })
+    result.map(_ => Done)
   }
 }
