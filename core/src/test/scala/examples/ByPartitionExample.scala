@@ -8,11 +8,9 @@ package examples
  * Copyright (C) 2014 - 2016 Softwaremill <http://softwaremill.com>
  * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
  */
-import java.math.BigInteger
-
 import akka.actor.ActorSystem
-import akka.kafka.ConsumerSettings
-import akka.kafka.internal.TopicPartitionSourceActor
+import akka.kafka.scaladsl.Consumer
+import akka.kafka.{ConsumerSettings, Subscription}
 import akka.stream.scaladsl.{Keep, Sink}
 import akka.stream.{ActorMaterializer, ActorMaterializerSettings}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, StringDeserializer}
@@ -22,28 +20,28 @@ object ByPartitionExample extends App {
   implicit val ec = as.dispatcher
   implicit val m = ActorMaterializer(ActorMaterializerSettings(as).withInputBuffer(1, 1))
 
-  import scala.collection.JavaConversions._
-
   val settings = ConsumerSettings
-    .create(as, new ByteArrayDeserializer, new StringDeserializer, Set("proto4.bss"))
-    .withBootstrapServers("k1.c.test:9092")
+    .create(as, new ByteArrayDeserializer, new StringDeserializer)
+    .withBootstrapServers("kafka.host")
     .withClientId(System.currentTimeMillis().toString)
     .withGroupId("test1")
 
-  val (control, f) = TopicPartitionSourceActor(settings)
+  val (control, f) = Consumer.committablePartitionedSource(settings, Subscription.topics("topic1"))
     .map {
       case (tp, s) =>
         println(s"Starting - $tp")
-        s.map { x =>
-          println(s"Got message - ${x.topic()}, ${x.partition()}, ${new BigInteger(x.key()).longValue()}")
-          Thread.sleep(1200)
-          x
+        s.map { msg =>
+          val tp = msg.committableOffset.partitionOffset.key
+          println(s"Got message - ${tp.topic}, ${tp.partition}, ${msg.value}")
+          Thread.sleep(100)
+          msg
         }
+          .mapAsync(1)(_.committableOffset.commit())
           .toMat(Sink.ignore)(Keep.right)
           .mapMaterializedValue((tp, _))
           .run()
     }
-    .map { case (tp, f) => f.onComplete(result => println(s"$tp finished with $result")); tp }
+    .map { case (tp, completion) => completion.onComplete(result => println(s"$tp finished with $result")); tp }
     .toMat(Sink.ignore)(Keep.both)
     .run()
 

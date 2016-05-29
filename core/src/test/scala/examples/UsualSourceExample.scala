@@ -9,10 +9,9 @@ package examples
  * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
  */
 import akka.actor.ActorSystem
-import akka.kafka.ConsumerSettings
-import akka.kafka.internal.ActorAPI
 import akka.kafka.scaladsl.Consumer
 import akka.kafka.scaladsl.Consumer.CommittableOffsetBatch
+import akka.kafka.{ConsumerSettings, Subscription}
 import akka.stream.scaladsl.{Keep, Sink}
 import akka.stream.{ActorMaterializer, ActorMaterializerSettings}
 import org.apache.kafka.common.serialization.{LongDeserializer, StringDeserializer}
@@ -24,15 +23,13 @@ object UsualSourceExample extends App {
   implicit val ec = as.dispatcher
   implicit val m = ActorMaterializer(ActorMaterializerSettings(as).withInputBuffer(1, 1))
 
-  import scala.collection.JavaConversions._
-
   val settings = ConsumerSettings
-    .create(as, new LongDeserializer, new StringDeserializer, Set("proto4.bss"))
+    .create(as, new LongDeserializer, new StringDeserializer)
     .withBootstrapServers("k1.c.test:9092")
     .withClientId(System.currentTimeMillis().toString)
     .withGroupId("test1")
 
-  val (control, f) = Consumer.committableSource[java.lang.Long, String](settings)
+  val (control, f) = Consumer.committableSource[java.lang.Long, String](settings, Subscription.topics("topic1"))
     .map { x => println(x.committableOffset.partitionOffset.offset); Thread.sleep(1000); x }
     .batch(max = 5, first => CommittableOffsetBatch.empty.updated(first.committableOffset)) { (batch, elem) =>
       batch.updated(elem.committableOffset)

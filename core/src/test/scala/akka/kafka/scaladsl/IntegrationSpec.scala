@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import akka.Done
 import akka.actor.ActorSystem
+import akka.kafka.Subscription.TopicSubscription
 import akka.kafka.{ConsumerSettings, ProducerSettings}
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{Keep, Source}
@@ -67,12 +68,12 @@ class IntegrationSpec extends TestKit(ActorSystem("IntegrationSpec"))
         .map(n => new ProducerRecord(topic1, null: Array[Byte], n.toString))
         .runWith(Producer.plainSink(producerSettings))
 
-      val consumerSettings = ConsumerSettings(system, new ByteArrayDeserializer, new StringDeserializer, Set(topic1))
+      val consumerSettings = ConsumerSettings(system, new ByteArrayDeserializer, new StringDeserializer)
         .withBootstrapServers("localhost:9092")
         .withGroupId(group1)
         .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
 
-      val probe = Consumer.plainSource(consumerSettings)
+      val probe = Consumer.plainSource(consumerSettings, TopicSubscription(Set(topic1)))
         // it's not 100% sure we get the first message, see https://issues.apache.org/jira/browse/KAFKA-3334
         .filterNot(_.value == InitialMsg)
         .map(_.value)
@@ -96,14 +97,14 @@ class IntegrationSpec extends TestKit(ActorSystem("IntegrationSpec"))
         .map(n => new ProducerRecord(topic1, partition0, null: Array[Byte], n.toString))
         .runWith(Producer.plainSink(producerSettings))
 
-      val consumerSettings = ConsumerSettings(system, new ByteArrayDeserializer, new StringDeserializer, Set(topic1))
+      val consumerSettings = ConsumerSettings(system, new ByteArrayDeserializer, new StringDeserializer)
         .withBootstrapServers("localhost:9092")
         .withGroupId(group1)
         .withClientId(client1)
         .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
 
       val committedElement = new AtomicInteger(0)
-      val (control, probe1) = Consumer.committableSource(consumerSettings)
+      val (control, probe1) = Consumer.committableSource(consumerSettings, TopicSubscription(Set(topic1)))
         .filterNot(_.value == InitialMsg)
         .mapAsync(10) { elem =>
           elem.committableOffset.commit().map { _ =>
@@ -121,7 +122,7 @@ class IntegrationSpec extends TestKit(ActorSystem("IntegrationSpec"))
       probe1.cancel()
       Await.result(control.isShutdown, remainingOrDefault)
 
-      val probe2 = Consumer.committableSource(consumerSettings)
+      val probe2 = Consumer.committableSource(consumerSettings, TopicSubscription(Set(topic1)))
         .map(_.value)
         .runWith(TestSink.probe)
 
@@ -152,13 +153,13 @@ class IntegrationSpec extends TestKit(ActorSystem("IntegrationSpec"))
         .map(n => new ProducerRecord(topic1, partition0, null: Array[Byte], n.toString))
         .runWith(Producer.plainSink(producerSettings))
 
-      val consumerSettings = ConsumerSettings(system, new ByteArrayDeserializer, new StringDeserializer, Set(topic1))
+      val consumerSettings = ConsumerSettings(system, new ByteArrayDeserializer, new StringDeserializer)
         .withBootstrapServers("localhost:9092")
         .withGroupId(group1)
         .withClientId(client1)
         .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
 
-      val (control, probe1) = Consumer.committableSource(consumerSettings)
+      val (control, probe1) = Consumer.committableSource(consumerSettings, TopicSubscription(Set(topic1)))
         .filterNot(_.value == InitialMsg)
         .toMat(TestSink.probe)(Keep.both)
         .run()

@@ -4,25 +4,20 @@
  */
 package examples
 
-import scala.concurrent.duration._
-import scala.concurrent.Future
-import akka.{Done, NotUsed}
-import org.apache.kafka.clients.producer.ProducerRecord
-import akka.kafka.scaladsl.Consumer.CommittableOffsetBatch
-import akka.kafka.scaladsl.Consumer
-import akka.kafka.scaladsl.Producer
-import org.apache.kafka.clients.consumer.ConsumerRecord
-import akka.kafka.ConsumerSettings
-import akka.kafka.ProducerSettings
-import org.apache.kafka.common.TopicPartition
 import akka.actor.ActorSystem
-import akka.stream.{ActorMaterializer, ActorMaterializerSettings}
+import akka.kafka.scaladsl.Consumer.CommittableOffsetBatch
+import akka.kafka.scaladsl.{Consumer, KafkaAsyncConsumer, Producer}
+import akka.kafka.{ConsumerSettings, ProducerSettings, Subscription}
 import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
-import org.apache.kafka.common.serialization.StringDeserializer
-import org.apache.kafka.common.serialization.ByteArrayDeserializer
-import org.apache.kafka.clients.consumer.ConsumerConfig
-import org.apache.kafka.common.serialization.StringSerializer
-import org.apache.kafka.common.serialization.ByteArraySerializer
+import akka.stream.{ActorMaterializer, ActorMaterializerSettings}
+import akka.{Done, NotUsed}
+import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
+import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer, StringDeserializer, StringSerializer}
+
+import scala.concurrent.Future
+import scala.concurrent.duration._
 
 trait ConsumerExample {
   implicit val system = ActorSystem("example")
@@ -30,7 +25,7 @@ trait ConsumerExample {
   implicit val m = ActorMaterializer(ActorMaterializerSettings(system))
 
   val maxPartitions = 100
-  val consumerSettings = ConsumerSettings(system, new ByteArrayDeserializer, new StringDeserializer, Set("topic1"))
+  val consumerSettings = ConsumerSettings(system, new ByteArrayDeserializer, new StringDeserializer)
     .withBootstrapServers("localhost:9092")
     .withGroupId("group1")
     .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
@@ -57,9 +52,8 @@ trait ConsumerExample {
 object ExternalOffsetStorageExample extends ConsumerExample {
   val db = new DB
   db.loadOffset().foreach { fromOffset =>
-    val settings = consumerSettings
-      .withFromOffset(new TopicPartition("topic1", 1), fromOffset)
-    Consumer.plainSource(settings)
+    val subscription = Subscription.assignmentWithOffset(new TopicPartition("topic1", 1) -> fromOffset)
+    Consumer.plainSource(consumerSettings, subscription)
       .mapAsync(1)(db.save)
   }
 }
@@ -68,7 +62,7 @@ object ExternalOffsetStorageExample extends ConsumerExample {
 object AtMostOnceExample extends ConsumerExample {
   val rocket = new Rocket
 
-  Consumer.atMostOnceSource(consumerSettings.withClientId("client1"))
+  Consumer.atMostOnceSource(consumerSettings.withClientId("client1"), Subscription.topics("topic1"))
     .mapAsync(1) { record =>
       rocket.launch(record.value)
     }
@@ -78,7 +72,7 @@ object AtMostOnceExample extends ConsumerExample {
 object AtLeastOnceExample extends ConsumerExample {
   val db = new DB
 
-  Consumer.committableSource(consumerSettings.withClientId("client1"))
+  Consumer.committableSource(consumerSettings.withClientId("client1"), Subscription.topics("topic1"))
     .mapAsync(1) { msg =>
       db.update(msg.value).flatMap(_ => msg.committableOffset.commit())
     }
@@ -88,7 +82,7 @@ object AtLeastOnceExample extends ConsumerExample {
 object AtLeastOnceWithBatchCommitExample extends ConsumerExample {
   val db = new DB
 
-  Consumer.committableSource(consumerSettings.withClientId("client1"))
+  Consumer.committableSource(consumerSettings.withClientId("client1"), Subscription.topics("topic1"))
     .mapAsync(1) { msg =>
       db.update(msg.value).map(_ => msg.committableOffset)
     }
@@ -100,7 +94,7 @@ object AtLeastOnceWithBatchCommitExample extends ConsumerExample {
 
 // Connect a Consumer to Producer
 object ConsumerToProducerSinkExample extends ConsumerExample {
-  Consumer.committableSource(consumerSettings.withClientId("client1"))
+  Consumer.committableSource(consumerSettings.withClientId("client1"), Subscription.topics("topic1"))
     .map(msg =>
       Producer.Message(new ProducerRecord[Array[Byte], String]("topic2", msg.value), msg.committableOffset))
     .to(Producer.commitableSink(producerSettings))
@@ -108,7 +102,7 @@ object ConsumerToProducerSinkExample extends ConsumerExample {
 
 // Connect a Consumer to Producer
 object ConsumerToProducerFlowExample extends ConsumerExample {
-  Consumer.committableSource(consumerSettings.withClientId("client1"))
+  Consumer.committableSource(consumerSettings.withClientId("client1"), Subscription.topics("topic1"))
     .map(msg =>
       Producer.Message(new ProducerRecord[Array[Byte], String]("topic2", msg.value), msg.committableOffset))
     .via(Producer.flow(producerSettings))
@@ -117,7 +111,7 @@ object ConsumerToProducerFlowExample extends ConsumerExample {
 
 // Connect a Consumer to Producer, and commit in batches
 object ConsumerToProducerWithBatchCommitsExample extends ConsumerExample {
-  Consumer.committableSource(consumerSettings.withClientId("client1"))
+  Consumer.committableSource(consumerSettings.withClientId("client1"), Subscription.topics("topic1"))
     .map(msg =>
       Producer.Message(new ProducerRecord[Array[Byte], String]("topic2", msg.value), msg.committableOffset))
     .via(Producer.flow(producerSettings))
@@ -130,7 +124,7 @@ object ConsumerToProducerWithBatchCommitsExample extends ConsumerExample {
 
 // Connect a Consumer to Producer, and commit in batches
 object ConsumerToProducerWithBatchCommits2Example extends ConsumerExample {
-  Consumer.committableSource(consumerSettings.withClientId("client1"))
+  Consumer.committableSource(consumerSettings.withClientId("client1"), Subscription.topics("topic1"))
     .map(msg =>
       Producer.Message(new ProducerRecord[Array[Byte], String]("topic2", msg.value), msg.committableOffset))
     .via(Producer.flow(producerSettings))
@@ -142,7 +136,7 @@ object ConsumerToProducerWithBatchCommits2Example extends ConsumerExample {
 
 // Backpressure per partition with batch commit
 object ConsumerWithPerPartitionBackpressure extends ConsumerExample {
-  val control = Consumer.committablePartitionedSource(consumerSettings.withClientId("client1"))
+  val control = Consumer.committablePartitionedSource(consumerSettings.withClientId("client1"), Subscription.topics("topic1"))
     .flatMapMerge(maxPartitions, _._2)
     .via(business)
     .batch(max = 100, first => CommittableOffsetBatch.empty.updated(first.committableOffset)) { (batch, elem) =>
@@ -151,9 +145,23 @@ object ConsumerWithPerPartitionBackpressure extends ConsumerExample {
     .mapAsync(1)(_.commit())
 }
 
+//externally controlled kafka consumer
+object ExternallyControlledKafkaConsumer extends ConsumerExample {
+  val consumer = KafkaAsyncConsumer(consumerSettings)
+  val stream1 = Consumer
+    .plainExternalSource(consumer, Subscription.assignment(new TopicPartition("topic1", 1)))
+    .via(business)
+    .to(Sink.ignore)
+
+  val stream2 = Consumer
+    .plainExternalSource(consumer, Subscription.assignment(new TopicPartition("topic1", 2)))
+    .via(business)
+    .to(Sink.ignore)
+}
+
 // Flow per partition
 object ConsumerWithIndependentFlowsPerPartition extends ConsumerExample {
-  val control = Consumer.committablePartitionedSource(consumerSettings.withClientId("client1"))
+  val control = Consumer.committablePartitionedSource(consumerSettings.withClientId("client1"), Subscription.topics("topic1"))
     .map {
       case (topicPartition, source) =>
         source
@@ -169,13 +177,13 @@ object ConsumerWithOtherSource extends ConsumerExample {
   type Msg = Consumer.CommittableMessage[Array[Byte], String]
   def zipper(left: Source[Msg, _], right: Source[Msg, _]): Source[(Msg, Msg), NotUsed] = ???
 
-  val control = Consumer.committablePartitionedSource(consumerSettings.withClientId("client1"))
+  val control = Consumer.committablePartitionedSource(consumerSettings.withClientId("client1"), Subscription.topics("topic1"))
     .map {
       case (topicPartition, source) =>
         // get corresponding partition from other topic
         val otherSource = {
           val otherTopicPartition = new TopicPartition("otherTopic", topicPartition.partition())
-          Consumer.committableSource(consumerSettings.withAssignment(otherTopicPartition))
+          Consumer.committableSource(consumerSettings, Subscription.assignment(otherTopicPartition))
         }
         zipper(source, otherSource)
     }

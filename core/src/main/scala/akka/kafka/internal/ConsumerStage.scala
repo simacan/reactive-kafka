@@ -4,16 +4,118 @@
  */
 package akka.kafka.internal
 
-import akka.Done
-import akka.kafka.scaladsl.Consumer
-import akka.kafka.scaladsl.Consumer.{ClientTopicPartition, CommittableOffsetBatch}
+import akka.{Done, NotUsed}
+import akka.kafka.{AutoSubscription, ConsumerSettings, Subscription}
+import akka.kafka.scaladsl.{Consumer, KafkaAsyncConsumer}
+import akka.kafka.scaladsl.Consumer._
+import akka.stream.{Attributes, Outlet, SourceShape}
+import akka.stream.scaladsl.Source
+import akka.stream.stage.{GraphStageLogic, GraphStageWithMaterializedValue}
+import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
+import org.apache.kafka.common.TopicPartition
 
-import scala.concurrent.Future
+import scala.concurrent.{ExecutionContext, Future, Promise}
 
 /**
  * INTERNAL API
  */
 private[kafka] object ConsumerStage {
+  def plainSubSource[K, V](settings: ConsumerSettings[K, V], subscription: AutoSubscription) = {
+    new KafkaSourceStage[K, V, (TopicPartition, Source[ConsumerRecord[K, V], NotUsed])] {
+      override protected def logic(shape: SourceShape[(TopicPartition, Source[ConsumerRecord[K, V], NotUsed])]) =
+        new SubSourceLogic[K, V, ConsumerRecord[K, V]](shape, settings, subscription) with PlainMessageBuilder[K, V]
+    }
+  }
+
+  def committableSubSource[K, V](settings: ConsumerSettings[K, V], subscription: AutoSubscription) = {
+    new KafkaSourceStage[K, V, (TopicPartition, Source[CommittableMessage[K, V], NotUsed])] {
+      override protected def logic(shape: SourceShape[(TopicPartition, Source[CommittableMessage[K, V], NotUsed])]) =
+        new SubSourceLogic[K, V, CommittableMessage[K, V]](shape, settings, subscription) with CommittableMessageBuilder[K, V] {
+          override def clientId: String = settings.properties(ConsumerConfig.CLIENT_ID_CONFIG)
+          lazy val committer: Committer = new KafkaAsyncConsumerCommitter(consumer)(ec)
+        }
+    }
+  }
+
+  def plainSource[K, V](settings: ConsumerSettings[K, V], subscription: Subscription) = {
+    new KafkaSourceStage[K, V, ConsumerRecord[K, V]] {
+      override protected def logic(shape: SourceShape[ConsumerRecord[K, V]]) =
+        new SingleSourceLogic[K, V, ConsumerRecord[K, V]](shape, settings, subscription) with PlainMessageBuilder[K, V]
+    }
+  }
+
+  def externalPlainSource[K, V](consumer: KafkaAsyncConsumer[K, V], subscription: Subscription) = {
+    new KafkaSourceStage[K, V, ConsumerRecord[K, V]] {
+      override protected def logic(shape: SourceShape[ConsumerRecord[K, V]]) =
+        new ExternalSingleSourceLogic[K, V, ConsumerRecord[K, V]](shape, consumer, subscription) with PlainMessageBuilder[K, V]
+    }
+  }
+
+  def committableSource[K, V](settings: ConsumerSettings[K, V], subscription: Subscription) = {
+    new KafkaSourceStage[K, V, CommittableMessage[K, V]] {
+      override protected def logic(shape: SourceShape[CommittableMessage[K, V]]) =
+        new SingleSourceLogic[K, V, CommittableMessage[K, V]](shape, settings, subscription) with CommittableMessageBuilder[K, V] {
+          override def clientId: String = settings.properties(ConsumerConfig.CLIENT_ID_CONFIG)
+          lazy val committer: Committer = new KafkaAsyncConsumerCommitter(consumer)(ec)
+        }
+    }
+  }
+
+  def externalCommittableSource[K, V](consumer: KafkaAsyncConsumer[K, V], _clientId: String, subscription: Subscription) = {
+    new KafkaSourceStage[K, V, CommittableMessage[K, V]] {
+      override protected def logic(shape: SourceShape[CommittableMessage[K, V]]) =
+        new ExternalSingleSourceLogic[K, V, CommittableMessage[K, V]](shape, consumer, subscription) with CommittableMessageBuilder[K, V] {
+          override def clientId: String = _clientId
+          lazy val committer: Committer = new KafkaAsyncConsumerCommitter(consumer)(ec)
+        }
+    }
+  }
+
+  class KafkaAsyncConsumerCommitter(client: KafkaAsyncConsumer[_, _])(implicit ec: ExecutionContext) extends Committer {
+    override def commit(offset: PartitionOffset): Future[Done] = {
+      client.commit(Map(
+        new TopicPartition(offset.key.topic, offset.key.partition) -> (offset.offset + 1)
+      )).map(_ => Done)
+    }
+    override def commit(batch: CommittableOffsetBatchImpl): Future[Done] = {
+      client.commit(batch.offsets.map {
+        case (ctp, offset) => new TopicPartition(ctp.topic, ctp.partition) -> (offset + 1)
+      }).map(_ => Done)
+    }
+  }
+
+  abstract class KafkaSourceStage[K, V, Msg]()
+      extends GraphStageWithMaterializedValue[SourceShape[Msg], Control] {
+    protected val out = Outlet[Msg]("out")
+    val shape = new SourceShape(out)
+    protected def logic(shape: SourceShape[Msg]): GraphStageLogic with Control
+    override def createLogicAndMaterializedValue(inheritedAttributes: Attributes) = {
+      val result = logic(shape)
+      (result, result)
+    }
+  }
+
+  private trait PlainMessageBuilder[K, V] extends MessageBuilder[K, V, ConsumerRecord[K, V]] {
+    override def createMessage(rec: ConsumerRecord[K, V]) = rec
+  }
+
+  private trait CommittableMessageBuilder[K, V] extends MessageBuilder[K, V, CommittableMessage[K, V]] {
+    def clientId: String
+    def committer: Committer
+    def ec: ExecutionContext
+
+    override def createMessage(rec: ConsumerRecord[K, V]) = {
+      val offset = Consumer.PartitionOffset(
+        ClientTopicPartition(
+          clientId = clientId,
+          topic = rec.topic,
+          partition = rec.partition
+        ),
+        offset = rec.offset
+      )
+      Consumer.CommittableMessage(rec.key, rec.value, CommittableOffsetImpl(offset)(committer))
+    }
+  }
 
   final case class CommittableOffsetImpl(override val partitionOffset: Consumer.PartitionOffset)(val committer: Committer)
       extends Consumer.CommittableOffset {
@@ -69,6 +171,32 @@ private[kafka] object ConsumerStage {
       }
     }
   }
-
 }
 
+private[kafka] trait MessageBuilder[K, V, Msg] {
+  def createMessage(rec: ConsumerRecord[K, V]): Msg
+}
+
+private[kafka] trait PromiseControl extends Control {
+  val shutdownPromise: Promise[Done] = Promise()
+  val stopPromise: Promise[Done] = Promise()
+
+  def stopped() = stopPromise.trySuccess(Done)
+  def shutdowned() = {
+    stopPromise.trySuccess(Done)
+    shutdownPromise.trySuccess(Done)
+  }
+
+  val performStop: Unit => Unit
+  val performShutdown: Unit => Unit
+
+  override def stop(): Future[Done] = {
+    performStop(())
+    stopPromise.future
+  }
+  override def shutdown(): Future[Done] = {
+    performShutdown(())
+    shutdownPromise.future
+  }
+  override def isShutdown: Future[Done] = shutdownPromise.future
+}
