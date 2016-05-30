@@ -18,6 +18,7 @@ import scala.collection.JavaConverters._
 import scala.concurrent.Promise
 
 object KafkaConsumerActor {
+  case class StoppingException() extends Exception("Kafka consumer is stopping")
   def props[K, V](settings: ConsumerSettings[K, V]) = Props(new KafkaConsumerActor(settings))
 
   //requests
@@ -27,6 +28,7 @@ object KafkaConsumerActor {
   private[kafka] case class SubscribePattern(pattern: String, listener: ConsumerRebalanceListener)
   private[kafka] case class RequestMessages(topics: Set[TopicPartition])
   private[kafka] case object Watch
+  private[kafka] case object Stop
   private[kafka] case class Commit(offsets: Map[TopicPartition, Long])
   //responses
   private[kafka] case class Assigned(partition: List[TopicPartition])
@@ -48,6 +50,8 @@ private[kafka] class KafkaConsumerActor[K, V](settings: ConsumerSettings[K, V]) 
   var finished: Promise[Done] = _
   var nextScheduledPoll: Option[Cancellable] = None
   var pollExpected = false
+  var commitsInProgress = 0
+  var stopInProgress = false
 
   def receive: Receive = LoggingReceive {
     case Watch => sender() ! finished.future
@@ -62,8 +66,10 @@ private[kafka] class KafkaConsumerActor[K, V](settings: ConsumerSettings[K, V]) 
     case Commit(offsets) =>
       val commitMap = offsets.mapValues(new OffsetAndMetadata(_))
       val reply = sender()
+      commitsInProgress += 1
       consumer.commitAsync(commitMap.asJava, new OffsetCommitCallback {
         override def onComplete(offsets: util.Map[TopicPartition, OffsetAndMetadata], exception: Exception): Unit = {
+          commitsInProgress -= 1
           if (exception != null) reply ! Status.Failure(exception)
           else reply ! Committed(offsets.asScala.toMap)
         }
@@ -82,12 +88,40 @@ private[kafka] class KafkaConsumerActor[K, V](settings: ConsumerSettings[K, V]) 
       requests ++= topics.map(_ -> sender()).toMap
       pollExpected = true
       poll()
+    case Stop =>
+      if (commitsInProgress == 0) {
+        context.stop(self)
+      }
+      else {
+        stopInProgress = true
+        context.become(stopping)
+      }
+  }
+
+  def stopping: Receive = LoggingReceive {
+    case Watch => sender() ! finished.future
+    case Assign(tps) =>
+    case AssignWithOffset(tps) =>
+    case Commit(offsets) =>
+      sender() ! Status.Failure(StoppingException())
+    case Subscribe(topics, listener) =>
+    case SubscribePattern(pattern, listener) =>
+    case Poll =>
+      pollExpected = true
+      poll()
+    case RequestMessages(topics) =>
+      sender() ! Status.Failure(StoppingException())
+    case Stop =>
   }
 
   override def preStart(): Unit = {
     super.preStart()
-    finished = Promise()
+    requests = Map.empty[TopicPartition, ActorRef]
     consumer = settings.createKafkaConsumer()
+    nextScheduledPoll = None
+    commitsInProgress = 0
+    pollExpected = false
+    finished = Promise()
     schedulePoll()
   }
 
@@ -139,7 +173,12 @@ private[kafka] class KafkaConsumerActor[K, V](settings: ConsumerSettings[K, V]) 
         //remove tps for which we got messages
         requests --= rawResult.partitions().asScala
       }
-      schedulePoll()
+      if (stopInProgress && commitsInProgress == 0) {
+        context.stop(self)
+      }
+      else {
+        schedulePoll()
+      }
     }
   }
 

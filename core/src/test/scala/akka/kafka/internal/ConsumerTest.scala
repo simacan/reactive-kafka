@@ -82,31 +82,31 @@ class ConsumerTest(_system: ActorSystem)
     Consumer.committableSource(settings, TopicSubscription(topics))
   }
 
-  //  it should "complete stage when stream control.stop called" in {
-  //    val mock = new ConsumerMock[K, V]()
-  //    val (control, probe) = testSource(mock)
-  //      .toMat(TestSink.probe)(Keep.both)
-  //      .run()
-  //
-  //    probe.request(100)
-  //
-  //    Await.result(control.shutdown(), remainingOrDefault)
-  //    probe.expectComplete()
-  //    mock.verifyClosed()
-  //  }
-  //
-  //  it should "complete stage when processing flow canceled" in {
-  //    val mock = new ConsumerMock[K, V]()
-  //    val (control, probe) = testSource(mock)
-  //      .toMat(TestSink.probe)(Keep.both)
-  //      .run()
-  //
-  //    probe.request(100)
-  //    mock.verifyClosed(never())
-  //    probe.cancel()
-  //    Await.result(control.isShutdown, remainingOrDefault)
-  //    mock.verifyClosed()
-  //  }
+  it should "complete stage when stream control.stop called" in {
+    val mock = new ConsumerMock[K, V]()
+    val (control, probe) = testSource(mock)
+      .toMat(TestSink.probe)(Keep.both)
+      .run()
+
+    probe.request(100)
+
+    Await.result(control.shutdown(), remainingOrDefault)
+    probe.expectComplete()
+    mock.verifyClosed()
+  }
+
+  it should "complete stage when processing flow canceled" in {
+    val mock = new ConsumerMock[K, V]()
+    val (control, probe) = testSource(mock)
+      .toMat(TestSink.probe)(Keep.both)
+      .run()
+
+    probe.request(100)
+    mock.verifyClosed(never())
+    probe.cancel()
+    Await.result(control.isShutdown, remainingOrDefault)
+    mock.verifyClosed()
+  }
 
   def toRecord(msg: Consumer.CommittableMessage[K, V]): ConsumerRecord[K, V] = {
     val offset = msg.committableOffset.partitionOffset
@@ -414,6 +414,8 @@ class ConsumerTest(_system: ActorSystem)
 
     val stopped = control.shutdown()
     probe.expectComplete()
+
+    Thread.sleep(100)
     stopped.isCompleted should ===(false)
 
     //emulate commit

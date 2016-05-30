@@ -38,7 +38,7 @@ object KafkaAsyncConsumer {
     }
 
     override def close(): Future[Done] = {
-      as.stop(ref)
+      ref ! Stop
       finished
     }
 
