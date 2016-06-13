@@ -387,9 +387,9 @@ private[kafka] abstract class ConsumerStageLogic[K, V, Out](
         // note that consumer.assignment() is automatically changed when using
         // dynamic subscriptions and we must use the current value to resume/pause
         if (isAvailable(out))
-          consumer.resume(consumer.assignment().asScala.toArray: _*)
+          consumer.resume(consumer.assignment().asScala.asJavaCollection)
         else
-          consumer.pause(consumer.assignment().asScala.toArray: _*)
+          consumer.pause(consumer.assignment().asScala.asJavaCollection)
       }
 
       def handleResult(records: ConsumerRecords[K, V]) = {
